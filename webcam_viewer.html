@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Webcam Viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: #111;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 12px; }
+  .controls {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  select, button {
+    background: #222;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  select:hover, button:hover { border-color: #666; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  video { display: none; }
+  #previewCanvas {
+    max-width: 90vw;
+    max-height: 70vh;
+    background: #000;
+    border-radius: 8px;
+    border: 1px solid #333;
+    cursor: default;
+  }
+  #previewCanvas.adjusting { cursor: crosshair; }
+  #snapshotCanvas { display: none; }
+  #status { margin-top: 10px; font-size: 0.85rem; color: #999; min-height: 1.2em; }
+  #snapPreview {
+    margin-top: 14px;
+    max-width: 300px;
+    border-radius: 6px;
+    border: 1px solid #333;
+    display: none;
+  }
+  #mainArea { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+  #scannedPanel, #localScannedPanel {
+    width: 320px;
+    max-width: 90vw;
+    max-height: 70vh;
+    overflow-y: auto;
+    background: #181818;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  #localScannedPanel { border-color: #2a4a2a; }
+  #scannedPanel h2, #localScannedPanel h2 { font-size: 0.95rem; margin: 0 0 8px; color: #ccc; }
+  #localScannedPanel h2 { color: #8fd18f; }
+  .scannedCard {
+    border-bottom: 1px solid #2a2a2a;
+    padding: 8px 0;
+    font-size: 0.85rem;
+  }
+  .scannedCard:last-child { border-bottom: none; }
+  .scannedCard .name { font-weight: 600; color: #eee; }
+  .scannedCard .meta { color: #999; font-size: 0.78rem; margin-top: 2px; }
+  .scannedCard a { color: #6cb4ff; text-decoration: none; }
+  .scannedCard a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <h1>Webcam Viewer</h1>
+  <div class="controls">
+    <select id="deviceSelect"><option>Loading cameras...</option></select>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="snapBtn" disabled>Snapshot</button>
+    <button id="downloadBtn" style="display:none;">Save PNG</button>
+    <button id="captureForClaudeBtn" disabled>Capture for Claude</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.9rem;">
+      <input type="checkbox" id="liveToggle" disabled>
+      Live stream to Claude
+    </label>
+    <select id="liveIntervalSelect" disabled>
+      <option value="500" selected>2/sec</option>
+      <option value="1000">1/sec</option>
+      <option value="2000">every 2s</option>
+      <option value="5000">every 5s</option>
+    </select>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.9rem;">
+      <input type="checkbox" id="autoDetectToggle" disabled>
+      Auto-detect new card
+    </label>
+    <button id="setCropBtn" disabled>Adjust Crop</button>
+    <button id="clearCropBtn" disabled>Clear Crop</button>
+  </div>
+  <div id="eventLog" style="font-size:0.8rem;color:#999;max-width:90vw;"></div>
+  <div id="focusPanel" class="controls" style="display:none;"></div>
+  <div id="mainArea">
+    <canvas id="previewCanvas" width="640" height="480"></canvas>
+    <div id="scannedPanel">
+      <h2>Scanned cards (Claude)</h2>
+      <div id="scannedList" style="color:#777;font-size:0.8rem;">None yet.</div>
+    </div>
+    <div id="localScannedPanel">
+      <h2>Local scan (LM Studio, live)</h2>
+      <div id="localScannedList" style="color:#777;font-size:0.8rem;">None yet.</div>
+    </div>
+  </div>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="snapshotCanvas"></canvas>
+  <img id="snapPreview" alt="snapshot preview">
+  <div id="status">Requesting camera permission will happen when you click Start.</div>
+
+<script>
+const deviceSelect = document.getElementById('deviceSelect');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const snapBtn = document.getElementById('snapBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const captureForClaudeBtn = document.getElementById('captureForClaudeBtn');
+const liveToggle = document.getElementById('liveToggle');
+const liveIntervalSelect = document.getElementById('liveIntervalSelect');
+const autoDetectToggle = document.getElementById('autoDetectToggle');
+const eventLog = document.getElementById('eventLog');
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const snapPreview = document.getElementById('snapPreview');
+const canvas = document.getElementById('snapshotCanvas');
+
+const focusPanel = document.getElementById('focusPanel');
+const previewCanvas = document.getElementById('previewCanvas');
+const previewCtx = previewCanvas.getContext('2d');
+const setCropBtn = document.getElementById('setCropBtn');
+const clearCropBtn = document.getElementById('clearCropBtn');
+const scannedList = document.getElementById('scannedList');
+
+let currentStream = null;
+let lastSnapshotUrl = null;
+let liveTimer = null;
+let liveInFlight = false;
+let liveFrameCount = 0;
+
+// --- crop state ---
+let crop = null; // {x,y,w,h} fractions of native video resolution
+try { crop = JSON.parse(localStorage.getItem('webcam_crop') || 'null'); } catch (_) { crop = null; }
+let cropAdjustMode = false;
+let cropFirstPoint = null; // first clicked corner, in canvas px, while selecting
+let dragRectPx = null;     // rectangle currently shown while selecting (from first point to cursor)
+let rafId = null;
+let lastRectKey = '';
+
+function getSavedCropRectPx() {
+  if (!video.videoWidth) return null;
+  if (crop) {
+    return {
+      sx: crop.x * video.videoWidth,
+      sy: crop.y * video.videoHeight,
+      sw: crop.w * video.videoWidth,
+      sh: crop.h * video.videoHeight
+    };
+  }
+  return { sx: 0, sy: 0, sw: video.videoWidth, sh: video.videoHeight };
+}
+
+function getDisplayCropRectPx() {
+  if (!video.videoWidth) return null;
+  if (cropAdjustMode || !crop) {
+    return { sx: 0, sy: 0, sw: video.videoWidth, sh: video.videoHeight };
+  }
+  return getSavedCropRectPx();
+}
+
+function resizePreviewCanvasForRect(rect) {
+  const maxDim = 760;
+  const aspect = rect.sw / rect.sh;
+  let w, h;
+  if (aspect >= 1) { w = maxDim; h = maxDim / aspect; }
+  else { h = maxDim; w = maxDim * aspect; }
+  previewCanvas.width = Math.round(w);
+  previewCanvas.height = Math.round(h);
+}
+
+function renderPreviewFrame() {
+  if (video.videoWidth) {
+    const rect = getDisplayCropRectPx();
+    const key = rect.sx + ',' + rect.sy + ',' + rect.sw + ',' + rect.sh;
+    if (key !== lastRectKey) { resizePreviewCanvasForRect(rect); lastRectKey = key; }
+    previewCtx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, previewCanvas.width, previewCanvas.height);
+    if (cropAdjustMode && dragRectPx) {
+      previewCtx.strokeStyle = '#4da3ff';
+      previewCtx.lineWidth = 2;
+      previewCtx.strokeRect(dragRectPx.x, dragRectPx.y, dragRectPx.w, dragRectPx.h);
+      previewCtx.fillStyle = 'rgba(77,163,255,0.15)';
+      previewCtx.fillRect(dragRectPx.x, dragRectPx.y, dragRectPx.w, dragRectPx.h);
+    }
+  }
+  rafId = requestAnimationFrame(renderPreviewFrame);
+}
+
+function canvasPointFromEvent(e) {
+  const r = previewCanvas.getBoundingClientRect();
+  const scaleX = previewCanvas.width / r.width;
+  const scaleY = previewCanvas.height / r.height;
+  return { x: (e.clientX - r.left) * scaleX, y: (e.clientY - r.top) * scaleY };
+}
+
+// Click-two-corners crop selection (more automation- and trackpad-friendly than drag).
+previewCanvas.addEventListener('mousemove', (e) => {
+  if (!cropAdjustMode || !cropFirstPoint) return;
+  const cur = canvasPointFromEvent(e);
+  dragRectPx = {
+    x: Math.min(cropFirstPoint.x, cur.x),
+    y: Math.min(cropFirstPoint.y, cur.y),
+    w: Math.abs(cur.x - cropFirstPoint.x),
+    h: Math.abs(cur.y - cropFirstPoint.y)
+  };
+});
+previewCanvas.addEventListener('click', (e) => {
+  if (!cropAdjustMode) return;
+  const pt = canvasPointFromEvent(e);
+  if (!cropFirstPoint) {
+    cropFirstPoint = pt;
+    dragRectPx = { x: pt.x, y: pt.y, w: 0, h: 0 };
+    setStatus('First corner set — click the opposite corner of the card.');
+    return;
+  }
+  const rect = {
+    x: Math.min(cropFirstPoint.x, pt.x),
+    y: Math.min(cropFirstPoint.y, pt.y),
+    w: Math.abs(pt.x - cropFirstPoint.x),
+    h: Math.abs(pt.y - cropFirstPoint.y)
+  };
+  if (rect.w > 10 && rect.h > 10) {
+    crop = {
+      x: rect.x / previewCanvas.width,
+      y: rect.y / previewCanvas.height,
+      w: rect.w / previewCanvas.width,
+      h: rect.h / previewCanvas.height
+    };
+    localStorage.setItem('webcam_crop', JSON.stringify(crop));
+    setStatus('Crop set — preview and all captures now use this region.');
+  } else {
+    setStatus('Crop selection too small — ignored.');
+  }
+  cropFirstPoint = null;
+  dragRectPx = null;
+  cropAdjustMode = false;
+  previewCanvas.classList.remove('adjusting');
+  setCropBtn.textContent = 'Adjust Crop';
+  lastRectKey = '';
+});
+
+setCropBtn.addEventListener('click', () => {
+  cropAdjustMode = !cropAdjustMode;
+  cropFirstPoint = null;
+  dragRectPx = null;
+  previewCanvas.classList.toggle('adjusting', cropAdjustMode);
+  setCropBtn.textContent = cropAdjustMode ? 'Click two corners of the card…' : 'Adjust Crop';
+  lastRectKey = '';
+  if (cropAdjustMode) setStatus('Click one corner of the card, then the opposite corner.');
+});
+clearCropBtn.addEventListener('click', () => {
+  crop = null;
+  localStorage.removeItem('webcam_crop');
+  lastRectKey = '';
+  setStatus('Crop cleared — showing full frame.');
+});
+
+// --- scanned cards panels (generic: works for both Claude and local-LLM feeds) ---
+function makeScannedPanelPoller(listEl, endpoint, pollMs) {
+  let lastSignature = '';
+  function render(records) {
+    const signature = JSON.stringify(records.map(r => [r.name, r.set, r.collector_number, r.quantity, r.last_seen_at]));
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    if (records.length === 0) {
+      listEl.innerHTML = '<span style="color:#777;font-size:0.8rem;">None yet.</span>';
+      return;
+    }
+    listEl.innerHTML = '';
+    records.slice().reverse().forEach(rec => {
+      const div = document.createElement('div');
+      div.className = 'scannedCard';
+      const priceStr = rec.price_usd ? `$${rec.price_usd}` : '';
+      const qtyBadge = rec.quantity > 1 ? ` <span style="color:#6cb4ff;">&times;${rec.quantity}</span>` : '';
+      div.innerHTML = `
+        <div class="name">${rec.name || 'Unknown'}${qtyBadge}</div>
+        <div class="meta">${rec.type_line || ''}${rec.mana_cost ? ' · ' + rec.mana_cost : ''}</div>
+        <div class="meta">${rec.set_name || rec.set || ''}${priceStr ? ' · ' + priceStr : ''}
+          ${rec.scryfall_uri ? ' · <a href="' + rec.scryfall_uri + '" target="_blank" rel="noopener">Scryfall</a>' : ''}
+        </div>
+      `;
+      listEl.appendChild(div);
+    });
+  }
+  async function poll() {
+    try {
+      const res = await fetch(endpoint, { cache: 'no-store' });
+      if (res.ok) render(await res.json());
+    } catch (_) { /* server may not be up yet */ }
+  }
+  poll();
+  setInterval(poll, pollMs);
+}
+
+makeScannedPanelPoller(scannedList, '/identified.json', 3000);
+makeScannedPanelPoller(document.getElementById('localScannedList'), '/local_scan.json', 2000);
+
+// --- change detection state ---
+const detectCanvas = document.createElement('canvas');
+const DETECT_W = 48, DETECT_H = 36;
+detectCanvas.width = DETECT_W;
+detectCanvas.height = DETECT_H;
+const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
+let prevDown = null;       // previous tick's downsampled grayscale frame
+let baselineDown = null;   // downsampled frame at time of last logged event
+let stableCount = 0;
+let everMovedSinceBaseline = false;
+const MOTION_THRESHOLD = 12;      // tick-to-tick diff to call "moving"
+const STABLE_TICKS_REQUIRED = 2;  // consecutive still ticks before we consider it "settled"
+const NEW_CONTENT_THRESHOLD = 18; // diff vs last logged event to call it genuinely new
+let eventCount = 0;
+
+function downsampleGray() {
+  const rect = getSavedCropRectPx();
+  detectCtx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, DETECT_W, DETECT_H);
+  const data = detectCtx.getImageData(0, 0, DETECT_W, DETECT_H).data;
+  const gray = new Uint8ClampedArray(DETECT_W * DETECT_H);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = (data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11);
+  }
+  return gray;
+}
+
+function meanAbsDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+function logEventLine(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  eventLog.prepend(div);
+  while (eventLog.children.length > 8) eventLog.removeChild(eventLog.lastChild);
+}
+
+function currentVideoTrack() {
+  return currentStream ? currentStream.getVideoTracks()[0] : null;
+}
+
+async function setupFocusControls() {
+  focusPanel.innerHTML = '';
+  focusPanel.style.display = 'none';
+  const track = currentVideoTrack();
+  if (!track || !track.getCapabilities) return;
+
+  let caps;
+  try { caps = track.getCapabilities(); } catch (err) { return; }
+
+  const rows = [];
+
+  if (caps.focusMode && caps.focusMode.length) {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.9rem;';
+    label.textContent = 'Focus mode: ';
+    const select = document.createElement('select');
+    caps.focusMode.forEach(mode => {
+      const opt = document.createElement('option');
+      opt.value = mode;
+      opt.textContent = mode;
+      select.appendChild(opt);
+    });
+    const settings = track.getSettings ? track.getSettings() : {};
+    if (settings.focusMode) select.value = settings.focusMode;
+    select.addEventListener('change', async () => {
+      try {
+        await track.applyConstraints({ advanced: [{ focusMode: select.value }] });
+        setStatus('Focus mode set to ' + select.value + '.');
+        setupFocusControls(); // re-render in case focusDistance slider should enable/disable
+      } catch (err) {
+        setStatus('Failed to set focus mode: ' + err.message);
+      }
+    });
+    label.appendChild(select);
+    rows.push(label);
+  }
+
+  if (caps.focusDistance) {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.9rem;';
+    label.textContent = 'Focus distance: ';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = caps.focusDistance.min;
+    range.max = caps.focusDistance.max;
+    range.step = caps.focusDistance.step || 1;
+    const settings = track.getSettings ? track.getSettings() : {};
+    range.value = settings.focusDistance ?? caps.focusDistance.min;
+    range.addEventListener('input', async () => {
+      try {
+        await track.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: Number(range.value) }] });
+      } catch (err) {
+        setStatus('Failed to set focus distance: ' + err.message);
+      }
+    });
+    label.appendChild(range);
+    rows.push(label);
+  }
+
+  if (caps.zoom) {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:0.9rem;';
+    label.textContent = 'Zoom: ';
+    const range = document.createElement('input');
+    range.type = 'range';
+    range.min = caps.zoom.min;
+    range.max = caps.zoom.max;
+    range.step = caps.zoom.step || 1;
+    const settings = track.getSettings ? track.getSettings() : {};
+    range.value = settings.zoom ?? caps.zoom.min;
+    range.addEventListener('input', async () => {
+      try {
+        await track.applyConstraints({ advanced: [{ zoom: Number(range.value) }] });
+      } catch (err) {
+        setStatus('Failed to set zoom: ' + err.message);
+      }
+    });
+    label.appendChild(range);
+    rows.push(label);
+  }
+
+  if (rows.length === 0) {
+    const note = document.createElement('span');
+    note.style.cssText = 'font-size:0.85rem;color:#999;';
+    note.textContent = 'This camera does not report focus/zoom capabilities to the browser (capabilities: ' + JSON.stringify(caps) + ').';
+    rows.push(note);
+  }
+
+  rows.forEach(r => focusPanel.appendChild(r));
+  focusPanel.style.display = 'flex';
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  setStatus(
+    'navigator.mediaDevices is unavailable on this page (' + location.protocol + '). ' +
+    'This usually means the page was not loaded from a secure context (https:// or http://localhost). ' +
+    'Serve this file over localhost instead of opening it as file://.'
+  );
+  startBtn.disabled = true;
+  deviceSelect.innerHTML = '<option value="">mediaDevices unavailable</option>';
+}
+
+async function listCameras() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    deviceSelect.innerHTML = '';
+    if (cams.length === 0) {
+      deviceSelect.innerHTML = '<option value="">No cameras found</option>';
+      setStatus('enumerateDevices() returned zero videoinput devices. Check Windows camera privacy settings (Settings > Privacy & security > Camera > let desktop apps/browser access camera) and that no other app is holding the camera open.');
+      return;
+    }
+    cams.forEach((cam, i) => {
+      const opt = document.createElement('option');
+      opt.value = cam.deviceId;
+      opt.textContent = cam.label || `Camera ${i + 1} (label hidden until permission granted)`;
+      deviceSelect.appendChild(opt);
+    });
+    setStatus(`Found ${cams.length} camera(s).`);
+  } catch (err) {
+    setStatus('Could not list cameras: ' + err.name + ' - ' + err.message);
+  }
+}
+
+function stopLiveStreaming() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  liveToggle.checked = false;
+}
+
+function stopStream() {
+  stopLiveStreaming();
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+  video.srcObject = null;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  snapBtn.disabled = true;
+  captureForClaudeBtn.disabled = true;
+  liveToggle.disabled = true;
+  liveIntervalSelect.disabled = true;
+  autoDetectToggle.disabled = true;
+  autoDetectToggle.checked = false;
+  setCropBtn.disabled = true;
+  clearCropBtn.disabled = true;
+  cropAdjustMode = false;
+  cropFirstPoint = null;
+  dragRectPx = null;
+  previewCanvas.classList.remove('adjusting');
+  setCropBtn.textContent = 'Adjust Crop';
+  focusPanel.innerHTML = '';
+  focusPanel.style.display = 'none';
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+}
+
+async function startStream() {
+  stopStream();
+  const deviceId = deviceSelect.value;
+  const constraints = {
+    video: deviceId ? { deviceId: { exact: deviceId } } : true,
+    audio: false
+  };
+  try {
+    setStatus('Requesting camera access...');
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentStream = stream;
+    video.srcObject = stream;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    snapBtn.disabled = false;
+    captureForClaudeBtn.disabled = false;
+    liveToggle.disabled = false;
+    liveIntervalSelect.disabled = false;
+    autoDetectToggle.disabled = false;
+    setCropBtn.disabled = false;
+    clearCropBtn.disabled = false;
+    setStatus('Streaming.');
+    // Labels are only populated after permission is granted, so refresh the list.
+    await listCameras();
+    if (deviceId) deviceSelect.value = deviceId;
+    await setupFocusControls();
+    lastRectKey = '';
+    if (!rafId) renderPreviewFrame();
+  } catch (err) {
+    setStatus('Failed to start camera: ' + err.name + ' - ' + err.message);
+  }
+}
+
+function takeSnapshot() {
+  if (!video.videoWidth) return;
+  const rect = getSavedCropRectPx();
+  canvas.width = rect.sw;
+  canvas.height = rect.sh;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(blob => {
+    if (lastSnapshotUrl) URL.revokeObjectURL(lastSnapshotUrl);
+    lastSnapshotUrl = URL.createObjectURL(blob);
+    snapPreview.src = lastSnapshotUrl;
+    snapPreview.style.display = 'block';
+    downloadBtn.style.display = 'inline-block';
+    downloadBtn.onclick = () => {
+      const a = document.createElement('a');
+      a.href = lastSnapshotUrl;
+      a.download = `snapshot-${Date.now()}.png`;
+      a.click();
+    };
+  }, 'image/png');
+}
+
+function captureFrameBlob() {
+  return new Promise((resolve, reject) => {
+    if (!video.videoWidth) { reject(new Error('No active video frame')); return; }
+    const rect = getSavedCropRectPx();
+    canvas.width = rect.sw;
+    canvas.height = rect.sh;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('toBlob failed')), 'image/png');
+  });
+}
+
+async function captureForClaude() {
+  try {
+    setStatus('Capturing frame...');
+    const blob = await captureFrameBlob();
+    const res = await fetch('/upload', { method: 'POST', body: blob });
+    if (!res.ok) throw new Error('Upload failed: ' + res.status);
+    setStatus('Frame saved to capture.png — tell Claude to look now.');
+  } catch (err) {
+    setStatus('Capture for Claude failed: ' + err.message);
+  }
+}
+
+async function runChangeDetection() {
+  if (!video.videoWidth) return;
+  const down = downsampleGray();
+
+  if (prevDown) {
+    const tickDiff = meanAbsDiff(down, prevDown);
+    if (tickDiff > MOTION_THRESHOLD) {
+      stableCount = 0;
+      everMovedSinceBaseline = true;
+    } else {
+      stableCount++;
+    }
+  }
+  prevDown = down;
+
+  if (!baselineDown) {
+    baselineDown = down; // first frame ever: just establish a baseline, don't fire
+    return;
+  }
+
+  if (stableCount === STABLE_TICKS_REQUIRED && everMovedSinceBaseline) {
+    const baselineDiff = meanAbsDiff(down, baselineDown);
+    if (baselineDiff > NEW_CONTENT_THRESHOLD) {
+      baselineDown = down;
+      everMovedSinceBaseline = false;
+      try {
+        const blob = await captureFrameBlob();
+        const res = await fetch('/event', { method: 'POST', body: blob });
+        if (!res.ok) throw new Error('Event upload failed: ' + res.status);
+        const record = await res.json();
+        eventCount++;
+        logEventLine(`#${record.index} captured (${new Date(record.ts * 1000).toLocaleTimeString()}) → events/${record.file}`);
+      } catch (err) {
+        logEventLine('Event capture error: ' + err.message);
+      }
+    }
+  }
+}
+
+async function liveTick() {
+  if (liveInFlight) return; // don't pile up requests if upload is slow
+  liveInFlight = true;
+  try {
+    const blob = await captureFrameBlob();
+    const res = await fetch('/upload', { method: 'POST', body: blob });
+    if (!res.ok) throw new Error('Upload failed: ' + res.status);
+    liveFrameCount++;
+    if (autoDetectToggle.checked) {
+      await runChangeDetection();
+      setStatus(`Live: frame #${liveFrameCount}, ${eventCount} card event(s) logged.`);
+    } else {
+      setStatus(`Live: frame #${liveFrameCount} saved to capture.png — ask Claude to look any time.`);
+    }
+  } catch (err) {
+    setStatus('Live capture error: ' + err.message);
+  } finally {
+    liveInFlight = false;
+  }
+}
+
+function startLiveStreaming() {
+  stopLiveStreaming();
+  liveTimer = setInterval(liveTick, Number(liveIntervalSelect.value));
+  liveTick();
+}
+
+startBtn.addEventListener('click', startStream);
+stopBtn.addEventListener('click', stopStream);
+snapBtn.addEventListener('click', takeSnapshot);
+captureForClaudeBtn.addEventListener('click', captureForClaude);
+deviceSelect.addEventListener('change', () => { if (currentStream) startStream(); });
+liveToggle.addEventListener('change', () => {
+  if (liveToggle.checked) startLiveStreaming(); else stopLiveStreaming();
+});
+liveIntervalSelect.addEventListener('change', () => {
+  if (liveToggle.checked) startLiveStreaming();
+});
+autoDetectToggle.addEventListener('change', () => {
+  if (autoDetectToggle.checked) {
+    prevDown = null;
+    baselineDown = null;
+    stableCount = 0;
+    everMovedSinceBaseline = false;
+    eventCount = 0;
+    eventLog.innerHTML = '';
+    logEventLine('Auto-detect armed — hold the current scene still for a moment to set the baseline.');
+    if (!liveToggle.checked) {
+      liveToggle.checked = true;
+      startLiveStreaming();
+    }
+  }
+});
+
+listCameras();
+navigator.mediaDevices.addEventListener?.('devicechange', listCameras);
+
+// If permission was already granted on a previous visit, this succeeds silently
+// with no prompt and no user gesture required, so the feed just comes up live.
+navigator.mediaDevices?.getUserMedia && (async () => {
+  try {
+    const perm = await navigator.permissions?.query?.({ name: 'camera' });
+    if (perm && perm.state === 'granted') {
+      await startStream();
+    }
+  } catch (_) { /* permissions API for camera not supported everywhere; ignore */ }
+})();
+</script>
+</body>
+</html>

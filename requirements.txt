@@ -1,0 +1,7 @@
+requests>=2.31
+
+# Optional: only needed for the DINOv2 local-recognition experiment in dino/
+torch>=2.0
+transformers>=4.40
+pillow
+numpy
