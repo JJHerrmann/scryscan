@@ -116,7 +116,7 @@ scripts for that are in `dino/`, nothing pre-built is shipped in this repo.
 
 ## Support
 
-If this is useful to you, tips are welcome: **[Ko-fi link goes here]**
+If this is useful to you, tips are welcome: **[ko-fi.com/mindpalacegarden](https://ko-fi.com/mindpalacegarden)**
 
 ## License
 
