@@ -80,6 +80,10 @@ pip install -r requirements.txt
   camera jitter and inflating its count.
 - Camera focus/zoom controls only appear if your webcam driver reports those
   capabilities to the browser — not all hardware does.
+- The page plays a short sound on each new card capture, plus a distinct
+  alert for cards scanned at $1+ / $5+ (see `sounds/`). Sound effects are
+  from [Kenney's Interface Sounds pack](https://kenney.nl/assets/interface-sounds)
+  (CC0).
 
 ## The DINOv2 experiment (`dino/`)
 

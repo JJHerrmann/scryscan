@@ -290,10 +290,26 @@ clearCropBtn.addEventListener('click', () => {
 // --- scanned cards panels (generic: works for both Claude and local-LLM feeds) ---
 function makeScannedPanelPoller(listEl, endpoint, pollMs) {
   let lastSignature = '';
+  let seenKeys = null; // null = haven't established a baseline yet (avoid sound spam on first load)
+  function recordKey(r) { return (r.set || '') + '/' + (r.collector_number || r.name || ''); }
   function render(records) {
     const signature = JSON.stringify(records.map(r => [r.name, r.set, r.collector_number, r.quantity, r.last_seen_at]));
     if (signature === lastSignature) return;
     lastSignature = signature;
+
+    const currentKeys = new Set(records.map(recordKey));
+    if (seenKeys === null) {
+      seenKeys = currentKeys; // first poll: just establish the baseline silently
+    } else {
+      for (const rec of records) {
+        if (!seenKeys.has(recordKey(rec))) {
+          const price = parseFloat((rec.foil_guess === 'yes' && rec.price_usd_foil) ? rec.price_usd_foil : rec.price_usd);
+          if (!isNaN(price)) playValueSound(price);
+        }
+      }
+      seenKeys = currentKeys;
+    }
+
     if (records.length === 0) {
       listEl.innerHTML = '<span style="color:#777;font-size:0.8rem;">None yet.</span>';
       return;
@@ -363,28 +379,19 @@ function meanAbsDiff(a, b) {
   return sum / a.length;
 }
 
-// Self-contained confirmation chime (Web Audio API, no sound file needed) - a
-// short two-note rising blip, played whenever a new card event is logged.
-let audioCtx = null;
-function playConfirmChime() {
+// Sound cues (Kenney interface-sounds pack, CC0): capture confirmation and
+// two value-tier alerts for newly scanned cards.
+function playSound(path, volume) {
   try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const notes = [660, 880]; // rising two-note blip
-    notes.forEach((freq, i) => {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      const start = audioCtx.currentTime + i * 0.09;
-      gain.gain.setValueAtTime(0.001, start);
-      gain.gain.exponentialRampToValueAtTime(0.18, start + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.12);
-      osc.start(start);
-      osc.stop(start + 0.13);
-    });
+    const audio = new Audio(path);
+    audio.volume = volume ?? 0.5;
+    audio.play().catch(() => {});
   } catch (_) { /* audio unavailable/blocked - not critical, ignore */ }
+}
+function playCaptureSound() { playSound('sounds/toggle_001.ogg', 0.4); }
+function playValueSound(price) {
+  if (price >= 5) playSound('sounds/maximize_006.ogg', 0.6);
+  else if (price >= 1) playSound('sounds/maximize_001.ogg', 0.5);
 }
 
 function logEventLine(text) {
@@ -668,7 +675,7 @@ async function runChangeDetection() {
         if (!res.ok) throw new Error('Event upload failed: ' + res.status);
         const record = await res.json();
         eventCount++;
-        playConfirmChime();
+        playCaptureSound();
         logEventLine(`#${record.index} captured (${new Date(record.ts * 1000).toLocaleTimeString()}) → events/${record.file}`);
       } catch (err) {
         logEventLine('Event capture error: ' + err.message);
