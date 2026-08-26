@@ -77,6 +77,13 @@
   .scannedCard:last-child { border-bottom: none; }
   .scannedCard .name { font-weight: 600; color: #eee; }
   .scannedCard .meta { color: #999; font-size: 0.78rem; margin-top: 2px; }
+  .scannedCard.highValue {
+    background: rgba(138, 99, 210, 0.12);
+    border-left: 3px solid #8A63D2;
+    padding-left: 8px;
+    margin-left: -11px;
+  }
+  .scannedCard.highValue .name { color: #cbb6f0; }
   .scannedCard a { color: #6cb4ff; text-decoration: none; }
   .scannedCard a:hover { text-decoration: underline; }
 </style>
@@ -294,7 +301,11 @@ function makeScannedPanelPoller(listEl, endpoint, pollMs) {
     listEl.innerHTML = '';
     records.slice().reverse().forEach(rec => {
       const div = document.createElement('div');
-      div.className = 'scannedCard';
+      const effectivePrice = parseFloat(
+        (rec.foil_guess === 'yes' && rec.price_usd_foil) ? rec.price_usd_foil : rec.price_usd
+      );
+      const isHighValue = !isNaN(effectivePrice) && effectivePrice >= 1.00;
+      div.className = 'scannedCard' + (isHighValue ? ' highValue' : '');
       const priceStr = rec.price_usd ? `$${rec.price_usd}` : '';
       const qtyBadge = rec.quantity > 1 ? ` <span style="color:#6cb4ff;">&times;${rec.quantity}</span>` : '';
       div.innerHTML = `
@@ -350,6 +361,30 @@ function meanAbsDiff(a, b) {
   let sum = 0;
   for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
   return sum / a.length;
+}
+
+// Self-contained confirmation chime (Web Audio API, no sound file needed) - a
+// short two-note rising blip, played whenever a new card event is logged.
+let audioCtx = null;
+function playConfirmChime() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const notes = [660, 880]; // rising two-note blip
+    notes.forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const start = audioCtx.currentTime + i * 0.09;
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.exponentialRampToValueAtTime(0.18, start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.12);
+      osc.start(start);
+      osc.stop(start + 0.13);
+    });
+  } catch (_) { /* audio unavailable/blocked - not critical, ignore */ }
 }
 
 function logEventLine(text) {
@@ -633,6 +668,7 @@ async function runChangeDetection() {
         if (!res.ok) throw new Error('Event upload failed: ' + res.status);
         const record = await res.json();
         eventCount++;
+        playConfirmChime();
         logEventLine(`#${record.index} captured (${new Date(record.ts * 1000).toLocaleTimeString()}) → events/${record.file}`);
       } catch (err) {
         logEventLine('Event capture error: ' + err.message);
